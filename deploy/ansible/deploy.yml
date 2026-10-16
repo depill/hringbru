@@ -131,7 +131,7 @@
       loop: '{{ hringbru_files }}'
     - name: Transfer private settings and trunk password without logging their contents
       ansible.builtin.copy:
-        src: '{{ hringbru_source }}/{{ item }}'
+        src: "{{ hringbru_env_file if item == '.env' else hringbru_source + '/' + item }}"
         dest: '{{ hringbru_release }}/{{ item }}'
         owner: root
         group: root
@@ -139,12 +139,26 @@
       loop: [.env, secrets/hringdu_password]
       no_log: true
       diff: false
+    - name: Check for an optional private alert webhook
+      ansible.builtin.stat:
+        path: '{{ hringbru_source }}/secrets/alert_webhook_url'
+      delegate_to: localhost
+      become: false
+      register: hringbru_webhook
+    - name: Transfer the optional alert destination privately
+      ansible.builtin.copy:
+        src: '{{ hringbru_source }}/secrets/alert_webhook_url'
+        dest: '{{ hringbru_release }}/secrets/alert_webhook_url'
+        mode: '0600'
+      when: hringbru_webhook.stat.exists
+      no_log: true
+      diff: false
     - name: Link persistent certificate and runtime data into this release
       ansible.builtin.file:
         path: '{{ hringbru_release }}/.local'
         src: '{{ hringbru_root }}/shared'
         state: link
-    - name: Build and apply the release under the maintenance lock
+    - name: Pull and apply the release under the maintenance lock
       ansible.builtin.command:
         argv:
           - /usr/bin/flock
@@ -183,7 +197,8 @@
           [Service]
           Type=oneshot
           WorkingDirectory={{ hringbru_root }}/current
-          ExecStart=/usr/bin/flock --nonblock /run/lock/{{ hringbru_service_prefix }}-maintenance.lock /usr/bin/python3 {{ hringbru_root }}/current/scripts/certificates.py renew
+          SuccessExitStatus=75
+          ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 75 /run/lock/{{ hringbru_service_prefix }}-maintenance.lock /usr/bin/python3 {{ hringbru_root }}/current/scripts/certificates.py renew
           UMask=0077
     - name: Install renewal timer
       ansible.builtin.copy:
@@ -212,6 +227,39 @@
     - name: Enable automatic certificate renewal
       ansible.builtin.systemd_service:
         name: '{{ hringbru_service_prefix }}-renew.timer'
+        enabled: true
+        state: started
+    - name: Install bridge monitoring service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/{{ hringbru_service_prefix }}-monitor.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Check Hringbru trunks, certificate, renewal, firewall and disk
+          After=docker.service network-online.target
+          [Service]
+          Type=oneshot
+          WorkingDirectory={{ hringbru_root }}/current
+          ExecStart=/usr/bin/python3 {{ hringbru_root }}/current/scripts/status.py --monitor --service-prefix {{ hringbru_service_prefix }}
+          UMask=0077
+          TimeoutStartSec=120
+    - name: Install bridge monitoring timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/{{ hringbru_service_prefix }}-monitor.timer
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Monitor Hringbru every minute
+          [Timer]
+          OnBootSec=2min
+          OnUnitInactiveSec=60s
+          AccuracySec=5s
+          [Install]
+          WantedBy=timers.target
+    - name: Enable bridge monitoring
+      ansible.builtin.systemd_service:
+        name: '{{ hringbru_service_prefix }}-monitor.timer'
+        daemon_reload: true
         enabled: true
         state: started
     - name: Report deployment status

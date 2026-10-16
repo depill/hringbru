@@ -1,5 +1,7 @@
 # Hringbrú
 
+[![Build and publish image](https://github.com/depill/hringbru/actions/workflows/image.yml/badge.svg)](https://github.com/depill/hringbru/actions/workflows/image.yml)
+
 **A small, reproducible SIP bridge between an existing Hringdu trunk and Microsoft Teams Phone.**
 
 Hringbrú packages Asterisk in Docker and uses Ansible to provision and deploy it to a Linux server. It is intended to carry incoming calls from the carrier into Teams and outgoing calls from Teams back through the carrier, with Let's Encrypt certificates securing the Teams SIP connection.
@@ -44,14 +46,15 @@ Media stays anchored on Asterisk. The Teams leg uses TLS 1.2 and SDES-SRTP; the 
 - **Two-way routing** with Icelandic number normalization, a restricted inbound DID range, and outbound caller-ID checks.
 - **Three Teams SIP peers**, with fallback on channel-unavailable or congestion responses.
 - **Let's Encrypt automation**, including full-chain installation, hostname/key checks and scheduled renewal.
-- **Ansible deployment** with private release directories, persistent certificate data, a maintenance lock and health checks.
+- **Ansible deployment** with CI-built images, private releases, a maintenance lock, health checks and automatic rollback.
+- **Status and alerts** for registration, Teams peers, certificate expiry, renewal failures, firewall presence and disk space.
 - **Source restrictions** for carrier and Teams signalling/media, plus an unprivileged Asterisk container with a read-only root filesystem.
 - **Teams PowerShell scripts** for the gateway, voice route, dial plan and explicit user assignments.
 - **Offline tests** for configuration, deployment behavior and SIP/TLS/SRTP signalling.
 
 ## Scope and requirements
 
-This repository currently targets **Hringdu Centrex and Icelandic numbering**. It is not a generic, ready-to-use configuration for every SIP provider. The checked-in routing rules and user-assignment script restrict the deployment to **4129900–4129919** (`+3544129900–+3544129919`). Change those allowlists and their tests before using another number range.
+This repository currently targets **Hringdu Centrex and Icelandic numbering**. It is not a generic, ready-to-use configuration for every SIP provider. Set `DID_NUMBERS` to the explicit E.164 numbers assigned to your trunk. Both the bridge and Teams assignment script enforce this allowlist; changing numbers requires no source edits. Icelandic normalization remains intentional.
 
 You will need:
 
@@ -113,6 +116,14 @@ Edit `.env` with your SBC hostname, public IPv4, actual local subnets, ACME cont
 
 The settings file uses **literal `KEY=value` syntax**: no quotes, shell expansion or inline comments. Required blank values must be filled before validation or deployment.
 
+Add your own permitted numbers to `.env`, for example `DID_NUMBERS=+3545550100,+3545550101` (illustrative numbers only; use the numbers actually assigned by your carrier). Generate a fresh user-mapping template from those settings:
+
+```sh
+python3 scripts/render.py --users-template teams/users.csv
+```
+
+The command refuses to overwrite existing mappings. Fill each row with the intended user; blank users are skipped.
+
 Set the password through a hidden local prompt:
 
 ```sh
@@ -150,7 +161,17 @@ If sudo requires a password:
 ./bin/deploy --ask-become-pass
 ```
 
-The deployment builds on the server's own architecture, so no image registry or local cross-compilation is required. It stages the release, validates configuration and firewall rules, obtains a certificate when needed, starts Asterisk and waits for container health before promoting the release.
+Wait for the checkout's [GitHub Actions build](https://github.com/depill/hringbru/actions/workflows/image.yml) to finish before deploying. CI builds and tests native **amd64 and arm64** images, then publishes `ghcr.io/depill/hringbru:sha-<full-commit>`. Deployment pulls the image matching your checkout's commit; Docker selects the server architecture. There is no automatic fallback to a server build.
+
+For a fork or a selected release, supply its exact image:
+
+```sh
+./bin/deploy --image ghcr.io/YOUR_OWNER/hringbru@sha256:YOUR_MANIFEST_DIGEST
+```
+
+Replace the placeholders (registry owner must be lowercase). A full `:sha-<40-character-commit>` tag is also accepted; a digest gives content-addressed pinning. Registry packages must be public for anonymous pulls; see [image publishing and access](docs/operations.md#ci-images-and-registry-access). An explicit `./bin/deploy --build` remains available for development or registry outages.
+
+The helper stages and validates configuration, pulls the image, snapshots the running deployment, obtains a certificate when needed, and waits for container health before promoting the release. Failed updates restore the previous image, mounted configuration, installed TLS files and firewall rules.
 
 Use `./bin/deploy --syntax-check` to check the playbook without credentials or SSH. `--inventory /path/to/inventory.yml` selects a different inventory.
 
@@ -168,7 +189,7 @@ The called DID comes from the Request-URI by default. An ambiguous registration 
 
 SIP REFER is disabled. Transfers, forwarding, queues, voicemail, privacy and long calls require live interoperability testing. User-assignment automation covers regular users; auto attendants and call queues need separately configured resource accounts.
 
-This is a **single-host bridge**. Updates have a short restart gap. The deploy command refuses replacement when it detects active channels, but a call arriving after the final check can still be interrupted. Unchanged healthy releases keep running. There is no automatic rollback or high-availability design.
+This is a **single-host bridge**. Updates have a short restart gap. The deploy command refuses replacement when it detects active channels, but a call arriving after the final check can still be interrupted. Unchanged healthy releases keep running. Automatic rollback restores the previous deployment after a failed update; it cannot preserve calls across replacement. There is no high-availability design.
 
 Let's Encrypt no longer issues certificates with the client-authentication EKU. [Microsoft currently accepts SBC certificates without it](https://learn.microsoft.com/en-us/microsoftteams/direct-routing-whats-new#clarification-on-client-authentication-extended-key-usage-eku), but TLS compatibility must be tested with the issued certificate and checked after renewal. See [Let's Encrypt's change notice](https://letsencrypt.org/2025/05/14/ending-tls-client-authentication/).
 
@@ -180,9 +201,20 @@ python3 -m unittest discover -s tests -v
 
 docker compose build asterisk
 python3 tests/smoke.py
+python3 tests/rollback.py
 ```
 
-The smoke test uses dummy credentials, a temporary certificate and an isolated container with external networking disabled. It checks loaded endpoints, TLS/SRTP support, CA roots, number normalization, rejected routes and generated SIP offers. It does not register with Hringdu, contact Teams or prove real call interoperability. Builds and runtime checks must also be repeated on the destination architecture.
+The smoke test uses dummy credentials, a temporary certificate and an isolated container with external networking disabled. It checks loaded endpoints, TLS/SRTP support, CA roots, number normalization, rejected routes and generated SIP offers. It does not register with Hringdu, contact Teams or prove real call interoperability. CI runs these checks on both supported architectures before publishing. The Docker rollback test deliberately fails candidate health and verifies restoration of the previous image and mounted files. Neither test proves live calls.
+
+## Check status and receive alerts
+
+After deploying this version:
+
+```sh
+./bin/deploy --status --ask-become-pass
+```
+
+Monitoring runs every minute on the server. Three consecutive bad samples open an incident, two healthy samples recover it, and ongoing incidents produce a reminder every six hours. Events go to the system journal by default. An optional HTTPS JSON webhook can be configured privately; see [monitoring](docs/operations.md#status-checks-and-alerts). The monitor observes service health and does not place calls or restart the bridge.
 
 ## Project guide
 

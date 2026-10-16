@@ -3,6 +3,7 @@ from contextlib import redirect_stdout
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -77,7 +78,7 @@ class DeploymentTest(unittest.TestCase):
         (self.release / 'secrets').mkdir()
         (self.release / '.local').symlink_to(self.shared)
         values = d.read_env(ROOT / '.env.example')
-        values.update(SBC_FQDN='sbc.example.net', HRINGDU_HOST='sip.provider.example',
+        values.update(DID_NUMBERS=','.join('+354'+str(n) for n in range(5550100,5550120)), ASTERISK_IMAGE='test:sha-'+'a'*40, SBC_FQDN='sbc.example.net', HRINGDU_HOST='sip.provider.example',
                       HRINGDU_USERNAME='00000000*0001', HRINGDU_CONTACT_USER='00000000*0001',
                       HRINGDU_FROM_USER='00000000*0001', PUBLIC_IPV4='8.8.8.8', HRINGDU_SIGNAL_CIDRS='9.9.9.9/32', HRINGDU_MEDIA_CIDRS='9.9.9.0/24', ACME_EMAIL='ops@example.is')
         (self.release / '.env').write_text(''.join(f'{k}={v}\n' for k,v in values.items()))
@@ -91,13 +92,16 @@ class DeploymentTest(unittest.TestCase):
         output = ''
         if args[:3] == ['docker', 'compose', '--project-directory']:
             command = args[4:]
+            if command[:1] == ['--project-name']: command = command[2:]
             if command[:1] == ['ps']: output = 'test-container\n' if self.running else ''
             elif command[:1] == ['exec']: output = f'{self.active} active channels\n0 active calls\n'
+            elif command[:1] == ['config']: output = json.dumps({'name': 'hringbru', 'services': {'asterisk': {'image': 'image-1', 'build': '.'}}})
+            elif command[:1] == ['stop']: self.running = False
             elif command[:1] == ['up']:
                 if self.fail_health: raise subprocess.CalledProcessError(1, args)
                 self.running = True
         elif args[:2] == ['docker', 'inspect']:
-            output = 'healthy\n' if args[3] == '{{.State.Health.Status}}' else 'image-1\n'
+            output = json.dumps([{'Image': 'image-1', 'State': {'Running': self.running, 'Health': {'Status': 'healthy'}}}])
         elif args[:3] == ['docker', 'image', 'inspect']: output = 'image-1\n'
         return subprocess.CompletedProcess(args, 0, output, '')
 
@@ -122,8 +126,7 @@ class DeploymentTest(unittest.TestCase):
         config = self.shared / 'asterisk/pjsip.conf'; before = config.stat().st_mtime_ns
         self.commands.clear(); self.active = 2
         self.apply()  # An unchanged healthy deployment does not interrupt existing calls.
-        second_up = next(c for c in self.commands if 'up' in c)
-        self.assertNotIn('--force-recreate', second_up)
+        self.assertFalse(any('up' in c for c in self.commands))
         self.assertEqual(config.stat().st_mtime_ns, before)
 
     def test_active_call_rejection_leaves_running_config_and_success_marker_untouched(self):
@@ -140,6 +143,38 @@ class DeploymentTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError): self.apply()
         self.assertFalse((self.base / 'current').exists())
         self.assertFalse((self.shared / 'deployed-version').exists())
+
+    def test_failed_update_restores_exact_previous_configuration_image_and_marker(self):
+        self.apply()
+        old_release = self.base / 'releases' / ('b' * 64)
+        self.release.rename(old_release)
+        (self.base / 'current').unlink(); (self.base / 'current').symlink_to(old_release)
+        self.release.mkdir(); (self.release / 'secrets').mkdir()
+        for name in ['.env', 'secrets/hringdu_password']:
+            (self.release / name).write_bytes((old_release / name).read_bytes())
+        (self.release / '.local').symlink_to(self.shared)
+        marker = self.shared / 'deployed-version'; marker.write_text(old_release.name + '\n')
+        config = self.shared / 'asterisk/pjsip.conf'
+        config.write_text('previous-private-configuration')
+        self.fail_health = True
+        with self.assertRaises(subprocess.CalledProcessError): self.apply()
+        self.assertEqual(config.read_text(), 'previous-private-configuration')
+        self.assertEqual(marker.read_text().strip(), old_release.name)
+        self.assertEqual((self.base / 'current').resolve(), old_release.resolve())
+        runtime = json.loads((self.shared / 'rollback/runtime.json').read_text())
+        self.assertEqual(runtime['services']['asterisk']['image'], 'image-1')
+        self.assertNotIn('build', runtime['services']['asterisk'])
+        self.assertFalse((self.shared / 'deployment-pending.json').exists())
+        self.assertTrue(any('runtime.json' in str(c) and 'up' in c for c in self.commands))
+
+    def test_interrupted_deployment_retains_snapshot_when_calls_block_recovery(self):
+        self.apply()
+        transaction = d.Transaction(self.base)
+        with patch.object(d, 'ROOT', self.release): transaction.begin(None, None)
+        self.running = True; self.active = 1
+        with self.assertRaisesRegex(ValueError, 'Active calls detected'): self.apply()
+        self.assertTrue(transaction.pending.exists())
+        self.assertTrue((transaction.path / 'asterisk/pjsip.conf').exists())
 
     def test_wrong_dns_prevents_build_and_firewall_changes(self):
         with self.assertRaisesRegex(ValueError, 'DNS-only A record'):

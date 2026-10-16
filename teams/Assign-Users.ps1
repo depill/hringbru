@@ -4,15 +4,23 @@
 param(
     [Parameter(Mandatory)][guid]$ExpectedTenantId,
     [ValidateSet('Hringbru', 'Sipsip')][string]$ResourcePrefix = 'Hringbru',
+    [string]$EnvPath = "$PSScriptRoot/../.env",
     [string]$CsvPath = "$PSScriptRoot/users.csv"
 )
 $ErrorActionPreference = 'Stop'
 $tenant = Get-CsTenant
 if ([guid]$tenant.TenantId -ne $ExpectedTenantId) { throw 'Connected Teams tenant does not match ExpectedTenantId.' }
+# Read only the allowlist from the literal settings; never evaluate shell expressions.
+$didLines = @(Get-Content -LiteralPath $EnvPath | Where-Object { $_ -match '^DID_NUMBERS=' })
+if ($didLines.Count -ne 1) { throw 'Set exactly one DID_NUMBERS entry in your private .env.' }
+$allowed = @($didLines[0].Substring(12).Split(',') | ForEach-Object { $_.Trim() })
+if ($allowed.Count -gt 200 -or @($allowed | Where-Object { $_ -notmatch '^\+354[0-9]{7}$' }).Count -gt 0) {
+    throw 'DID_NUMBERS must contain explicit Icelandic E.164 numbers.'
+}
 $rows = @(Import-Csv -LiteralPath $CsvPath)
 $numbers = @{}; $users = @{}; $plan = @()
 foreach ($row in $rows) {
-    if ($row.PhoneNumber -notmatch '^\+35441299[01]\d$') { throw "Number outside assigned block: $($row.PhoneNumber)" }
+    if ($row.PhoneNumber -notin $allowed) { throw "Number outside DID_NUMBERS: $($row.PhoneNumber)" }
     if ($numbers.ContainsKey($row.PhoneNumber)) { throw "Duplicate number: $($row.PhoneNumber)" }
     $numbers[$row.PhoneNumber] = $true
     if ([string]::IsNullOrWhiteSpace($row.UserPrincipalName)) { continue }

@@ -9,7 +9,7 @@ sudo apt-get update
 sudo apt-get install -y python3 openssl nftables
 cd /opt/hringbru
 cp .env.example .env
-cp teams/users.example.csv teams/users.csv
+python3 scripts/render.py --users-template teams/users.csv
 ```
 
 Edit `.env` with the real deployment details. It uses literal `KEY=value`, without quotes, variable expansion or inline comments. Carrier source ranges are mandatory and are never guessed from one DNS lookup. Deployment-specific values are intentionally blank in `.env.example` and must be filled before validation.

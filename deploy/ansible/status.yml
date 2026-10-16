@@ -1,0 +1,23 @@
+---
+- name: Read bridge status without deploying
+  hosts: hringbru
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Query deployed status checks
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - "{{ hringbru_install_root | default('/opt/hringbru') }}/current/scripts/status.py"
+          - --service-prefix
+          - "{{ hringbru_service_name | default('hringbru') }}"
+      register: hringbru_status
+      changed_when: false
+      failed_when: false
+    - name: Display status
+      ansible.builtin.debug:
+        msg: '{{ hringbru_status.stdout_lines + hringbru_status.stderr_lines }}'
+    - name: Require healthy status
+      ansible.builtin.assert:
+        that: hringbru_status.rc == 0
+        fail_msg: Bridge checks reported a problem; see the status output above.

@@ -2,7 +2,7 @@ name: ${HRINGBRU_PROJECT_NAME:-hringbru}
 services:
   asterisk:
     build: .
-    image: hringbru-asterisk:22.11.0
+    image: ${ASTERISK_IMAGE:-hringbru-asterisk:22.11.0}
     network_mode: host
     restart: unless-stopped
     init: true

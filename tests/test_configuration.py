@@ -13,7 +13,7 @@ spec.loader.exec_module(r)
 
 def settings():
     v = r.read_env(ROOT / '.env.example')
-    v.update(SBC_FQDN='sbc.example.net', PUBLIC_IPV4='8.8.8.8', LOCAL_NETS='10.0.0.0/24',
+    v.update(DID_NUMBERS=','.join('+354'+str(n) for n in range(5550100,5550120)), SBC_FQDN='sbc.example.net', PUBLIC_IPV4='8.8.8.8', LOCAL_NETS='10.0.0.0/24',
              HRINGDU_HOST='sip.provider.example', HRINGDU_USERNAME='00000000*0001',
              HRINGDU_CONTACT_USER='00000000*0001', HRINGDU_FROM_USER='00000000*0001',
              HRINGDU_SIGNAL_CIDRS='9.9.9.9/32', HRINGDU_MEDIA_CIDRS='9.9.9.0/24')
@@ -49,6 +49,17 @@ class ConfigurationTest(unittest.TestCase):
                 with self.assertRaises(ValueError): r.validate(v, 'test-only')
         for password in ('abc\n[evil]', 'a\rb', '', ' secret '):
             with self.assertRaises(ValueError): r.validate(settings(), password)
+
+    def test_explicit_noncontiguous_allowlist_and_invalid_numbers(self):
+        v = settings(); v['DID_NUMBERS'] = '+3545550700,+3545550912'
+        pattern = r.validate(v, 'test-only')['DID_PATTERN']
+        import re
+        self.assertTrue(re.fullmatch(pattern, '+3545550700'))
+        self.assertTrue(re.fullmatch(pattern, '+3545550912'))
+        self.assertFalse(re.fullmatch(pattern, '+3545550701'))
+        for numbers in ['', '+3545550700,+3545550700', '+442079460000', '+3545550700|.*']:
+            v['DID_NUMBERS'] = numbers
+            with self.assertRaises(ValueError): r.validate(v, 'test-only')
 
     def test_password_delimiters_and_backslashes_preserved(self):
         self.assertEqual(r.validate(settings(), r'a\b;cd')['HRINGDU_PASSWORD'], r'a\b\;cd')

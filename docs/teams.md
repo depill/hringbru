@@ -16,7 +16,7 @@ The script creates/updates Hringbru-named routing objects, appends one global PS
 
 For a tenant already configured under the former project name, add `-ResourcePrefix Sipsip` to both `Configure-Teams.ps1` and `Assign-Users.ps1`. This retains the existing `Sipsip-Hringdu` and `Sipsip-Iceland` objects and assignments. New tenants use the default `Hringbru` prefix.
 
-Fill only explicitly agreed user mappings in `teams/users.csv`, then:
+Generate your blank mapping with `python3 scripts/render.py --users-template teams/users.csv`. The script reads `DID_NUMBERS` from the private `.env` (override `-EnvPath` if needed). Fill only explicitly agreed user mappings in `teams/users.csv`, then:
 
 ```powershell
 ./teams/Assign-Users.ps1 -ExpectedTenantId '<tenant-guid>' -WhatIf

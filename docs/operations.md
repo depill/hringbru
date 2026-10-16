@@ -81,7 +81,7 @@ The prompt needs the regular account's sudo password. If you have neither a work
 
 Release and shared-data directories are root-only. Docker bind mounts expose the required child directories to the unprivileged Asterisk UID 10001. Do not loosen the private parent directory permissions.
 
-`current` is promoted only after the container passes its health check. Named Docker volumes preserve Asterisk's writable data across container replacement. Image builds run on the server. Old release directories are retained and contain private settings and passwords; archive or remove them according to your retention policy, preserving the active release and shared state.
+`current` is promoted only after the container passes its health check. Named Docker volumes preserve Asterisk's writable data across container replacement. Images are pulled from the registry by commit tag or digest. Explicit `--build` opts into a server build. Old release directories are retained and contain private settings and passwords; archive or remove them according to your retention policy, preserving the active release and shared state.
 
 ## Routine changes
 
@@ -93,7 +93,11 @@ Edit the workstation's private `.env`, inventory or password file, then run:
 
 An unchanged healthy release avoids a restart. Changes that require container replacement are refused when active channels are detected; retry after calls finish. A second check runs just before replacement. This is not seamless call migration: plan a quiet maintenance window for changed releases.
 
-A failed health check exits with an error and does not promote the success marker. It does not automatically restore the previous container or shared configuration. Inspect the failure and retry or redeploy the intended source/configuration. The old `current` symlink alone is not evidence that the old container is still serving calls.
+Before mounted configuration changes, deployment snapshots the previous Compose runtime with its exact Docker image ID, configuration, installed TLS files, firewall and success marker in `shared/rollback`. The previous image also receives a local `hringbru-rollback:<project>` tag, protecting it from dangling-image pruning. On startup failure, the helper stops the candidate, restores those files and recreates the prior container without pulling or building. `current` and the marker return to the prior release. The named data volume and ACME account/certificate archive are preserved.
+
+The private `shared/deployment-pending.json` journal marks an unfinished transaction. Re-running `./bin/deploy` first attempts recovery. If active calls prevent recovery, the helper leaves the snapshot and journal intact and exits; retry after calls finish. An unresponsive Docker daemon, unreadable call count or failed restoration can also require intervention. Check for `ROLLED BACK` and healthy status; a retained old symlink alone is insufficient. Never delete a pending journal or its snapshot to force a deployment.
+
+A first installation has no prior runtime. If it fails, the candidate is stopped, no success marker is created, and the restrictive application firewall remains applied. Inspect the failure before retrying. The snapshot does not provide database migrations, cross-host disaster recovery, or rollback of changes to host packages/systemd units.
 
 If the first deployment fails, `current` does not exist yet. Inspect the container directly from your workstation:
 
@@ -104,6 +108,22 @@ ssh -t YOUR_SSH_TARGET 'sudo docker logs --tail=100 hringbru-asterisk-1'
 Certificate installation and configuration rendering explicitly set permissions on mounted children for container UID 10001, even with the server's private umask. The parent shared directory remains root-only. Redeployment repairs the mounted TLS permissions using the existing valid certificate.
 
 Previous manual `/opt/hringbru/.local` deployments require explicit migration of their private data to the shared layout. The playbook refuses to abandon that directory silently.
+
+## CI images and registry access
+
+The GitHub workflow runs on pushes to `main`, version tags, manual dispatch and pull requests. Every architecture runs unit tests, Ansible syntax checks, offline SIP/TLS/SRTP tests and the Docker rollback fixture. Only successful trusted builds publish architecture images; the final multi-platform commit tag appears after both architectures succeed. Pull requests never log in or push to the registry. Actions are pinned to commit SHAs; publishing uses the job's `GITHUB_TOKEN` with package-write permission.
+
+Images are published under `ghcr.io/<repository-owner>/<repository-name>:sha-<full-commit>`, with an OCI source label linking them to the repository. Fork deployments must use `--image` to select their registry. No SIP settings, passwords, user mappings or certificates enter the image. CI uses only dummy fixtures and never deploys to the server or changes Teams.
+
+**First publication:** GitHub initially creates GHCR packages as private. In GitHub, open your profile or organization **Packages → hringbru → Package settings → Change visibility → Public** if anonymous deployment is intended. Alternatively, authenticate root's Docker client on the destination host using a token with `read:packages`; do not put that token in `.env`, inventory or this repository. Deployment fails before changing the running bridge if the image cannot be pulled. [GitHub container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
+Use the manifest digest from the successful Actions job summary for a content-addressed deployment. Commit tags identify source revisions but can be rebuilt; a digest identifies exact image bytes. Do not remove images tagged `hringbru-rollback:*`, use `docker image prune -a`, or prune retained releases during a pending transaction. Both old releases and rollback snapshots contain private data.
+
+For a deliberate source build:
+
+```sh
+./bin/deploy --build --ask-become-pass
+```
 
 ## Existing Sipsip installations
 
@@ -151,6 +171,31 @@ Monitor container health, Hringdu registration, Teams SBC health, certificate ex
 Teams AORs use `qualify_2xx_only=yes` so SIP errors cannot count as successful probes. Earlier releases used Asterisk's default, which can show `Avail` even for a `403` response. Confirm an actual `200 OK` to outgoing OPTIONS and an incoming Microsoft OPTIONS answered with `200 OK`; outbound contact status alone does not prove both directions work.
 
 AMI, ARI, the HTTP interface and SIP phone registration are not enabled. Persistent CDR/CEL recording is disabled in the supplied configuration.
+
+## Status checks and alerts
+
+On your workstation, `./bin/deploy --status --ask-become-pass` reads the deployed version's checks through Ansible without deploying anything. On the server itself:
+
+```sh
+sudo python3 /opt/hringbru/current/scripts/status.py
+sudo python3 /opt/hringbru/current/scripts/status.py --json
+sudo systemctl list-timers hringbru-monitor.timer
+sudo journalctl -u hringbru-monitor.service --since yesterday
+```
+
+For a legacy installation use `/opt/sipsip/current`, `sipsip-monitor.*` and add `--service-prefix sipsip` to direct status commands. Exit codes are 0 healthy, 1 warning and 2 critical. Planned deployment/renewal lock contention skips the sample.
+
+Checks cover container health, Hringdu registration, all three Teams contact qualifications, installed certificate hostname/expiry, renewal timer/service result, application firewall table presence and disk space. One or two available Teams peers are a warning; none is critical. Certificate warnings begin at 14 days, critical at 3 days. These checks do not prove inbound Microsoft OPTIONS, two-way audio, user assignment, cloud firewall rules or end-to-end calls.
+
+The minute timer sends local journal incidents after three bad samples, recovery after two good ones and six-hour reminders while unhealthy. State persists privately in `shared/monitor-state.json`. Maintenance samples are skipped. Failed webhook deliveries retry on later samples. There is no automatic restart or call placement. Monitor the host externally as well: a powered-off host cannot send alerts, and a failed timer cannot report its own failure.
+
+For an optional webhook, write your HTTPS endpoint URL into the ignored `secrets/alert_webhook_url`, restrict it with `chmod 600 secrets/alert_webhook_url`, then deploy. Keep the destination blank/absent for journal-only monitoring. This is a generic JSON webhook, not a Teams/Slack-specific message format: point it at an endpoint or automation that accepts this payload:
+
+```json
+{"service":"hringbru","event":"incident","status":"critical","checked_at":"...","checks":{},"issues":[{"level":"critical","message":"Hringdu registration is not Registered."}]}
+```
+
+Events are `incident`, `reminder` and `recovery`. No raw SIP traces, phone numbers, passwords or private keys are included. URLs are withheld from error output, requests time out after ten seconds and redirects are refused. No external alert is sent unless a destination is configured; destination testing remains an operator step.
 
 ## Certificate renewal
 

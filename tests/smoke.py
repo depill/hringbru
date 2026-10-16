@@ -25,7 +25,7 @@ def run(*args, **kwargs):
 
 
 def main():
-    image = 'hringbru-asterisk:22.11.0'
+    image = os.environ.get('ASTERISK_IMAGE', 'hringbru-asterisk:22.11.0')
     name = 'hringbru-smoke-' + uuid.uuid4().hex[:8]
     run('docker', 'image', 'inspect', image)
     with tempfile.TemporaryDirectory(prefix='hringbru-smoke-') as temp:
@@ -37,7 +37,7 @@ def main():
         certificate_source = local / 'letsencrypt/live/sbc.example.net'
         certificate_source.mkdir(parents=True)
         v = r.read_env(ROOT / '.env.example')
-        v.update(SBC_FQDN='sbc.example.net', PUBLIC_IPV4='8.8.8.8', HRINGDU_PORT='65060', LOCAL_NETS='10.0.0.0/24',
+        v.update(DID_NUMBERS=','.join('+354'+str(n) for n in range(5550100,5550120)), SBC_FQDN='sbc.example.net', PUBLIC_IPV4='8.8.8.8', HRINGDU_PORT='65060', LOCAL_NETS='10.0.0.0/24',
                  HRINGDU_HOST='sip.provider.example', HRINGDU_USERNAME='00000000*0001',
                  HRINGDU_CONTACT_USER='00000000*0001', HRINGDU_FROM_USER='00000000*0001',
                  HRINGDU_SIGNAL_CIDRS='9.9.9.9/32', HRINGDU_MEDIA_CIDRS='9.9.9.0/24')
@@ -58,27 +58,27 @@ def main():
         with (cfg / 'modules.conf').open('a') as f:
             f.write('\nload=func_db.so\nload=res_clioriginate.so\nload=res_pjsip_logger.so\n')
         normalization = {
-            '4129900': '+3544129900', '4129919': '+3544129919', '3544129907': '+3544129907',
-            '003544129908': '+3544129908', '+3544129909': '+3544129909',
+            '5550100': '+3545550100', '5550119': '+3545550119', '3545550107': '+3545550107',
+            '003545550108': '+3545550108', '+3545550109': '+3545550109',
             '00442079460000': '+442079460000', '+442079460000': '+442079460000',
             '123': '', '12345678': '', '0001234567': '',
         }
         cases = []
         with (cfg / 'extensions.conf').open('a') as f:
-            f.write('\n[hringbru-test]\nexten => valid,1,Set(CALLERID(num)=5551234)\n same => n,Goto(from-hringdu,+3544129900,1)\n'
-                    'exten => validout,1,Set(CALLERID(num)=+3544129919)\n same => n,Goto(from-teams,+3545551234,1)\n')
+            f.write('\n[hringbru-test]\nexten => valid,1,Set(CALLERID(num)=5551234)\n same => n,Goto(from-hringdu,+3545550100,1)\n'
+                    'exten => validout,1,Set(CALLERID(num)=+3545550119)\n same => n,Goto(from-teams,+3545551234,1)\n')
             for i, (number, expected) in enumerate(normalization.items()):
                 ext = f'norm{i}'
                 f.write(f'exten => {ext},1,Gosub(normalize-number,s,1({number}))\n'
                         f' same => n,Set(DB(smoke/{ext})=result:${{NORMALIZED}})\n same => n,Hangup()\n')
                 cases.append((ext, 'result:' + expected))
             for i, (context, dest, cli) in enumerate((
-                ('from-hringdu', '+3544129920', '+3545551234'),
+                ('from-hringdu', '+3545550120', '+3545551234'),
                 ('from-hringdu', '00000000*0001', '+3545551234'),
-                ('from-teams', '+3545551234', '+3544129920'),
-                ('from-teams', '+442079460000', '+3544129900'),
-                ('from-teams', '113', '+3544129900'),
-                ('from-teams', '+3545551234abc', '+3544129900'),
+                ('from-teams', '+3545551234', '+3545550120'),
+                ('from-teams', '+442079460000', '+3545550100'),
+                ('from-teams', '113', '+3545550100'),
+                ('from-teams', '+3545551234abc', '+3545550100'),
             )):
                 ext = f'reject{i}'
                 f.write(f'exten => {ext},1,Set(CALLERID(num)={cli})\n'
@@ -159,7 +159,7 @@ def main():
                 wire = run('docker', 'exec', name, 'cat', '/tmp/teams-wire')
                 if 'a=crypto:' in wire: break
                 time.sleep(0.1)
-            assert 'INVITE sip:+3544129900@127.0.0.1:65061' in wire, wire
+            assert 'INVITE sip:+3545550100@127.0.0.1:65061' in wire, wire
             assert 'Contact: <sip:hringbru@sbc.example.net:5061;transport=TLS>' in wire, wire
             assert 'SIP/2.0/TLS sbc.example.net:5061' in wire, wire
             assert 'RTP/SAVP' in wire and 'AES_CM_128_HMAC_SHA1_80' in wire, wire
@@ -172,7 +172,7 @@ def main():
                 if 'INVITE sip:5551234@127.0.0.1:65060' in logs: break
                 time.sleep(0.1)
             assert 'INVITE sip:5551234@127.0.0.1:65060' in logs, 'Outbound national destination was not sent.'
-            assert 'P-Asserted-Identity: <sip:4129919@127.0.0.1>' in logs, 'Outbound caller DID was not sent.'
+            assert 'P-Asserted-Identity: <sip:5550119@127.0.0.1>' in logs, 'Outbound caller DID was not sent.'
             cli('channel request hangup all')
             logs = logs.replace("Could not find option 'minimum_size' with type 'threadpool' in module 'stasis'", '')  # Upstream 22.11 documentation warning.
             for marker in ('Unable to load module', 'Could not create an object', 'Could not find option',

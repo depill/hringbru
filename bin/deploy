@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def payload_files():
     files = ['Dockerfile', '.dockerignore', 'compose.yaml']
     files += [str(p.relative_to(ROOT)) for p in sorted((ROOT / 'config').iterdir()) if p.is_file()]
-    files += ['scripts/' + name for name in ('entrypoint.sh', 'render.py', 'certificates.py', 'deploy-server.py')]
+    files += ['scripts/' + name for name in ('entrypoint.sh', 'render.py', 'certificates.py', 'deploy-server.py', 'status.py')]
     return files
 
 
@@ -50,16 +51,21 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--validate', action='store_true', help='Validate local inputs only, without SSH.')
     mode.add_argument('--check-server', action='store_true', help='Audit host prerequisites without sudo, Python, or configuration changes.')
+    mode.add_argument('--status', action='store_true', help='Read live status through Ansible, without deploying.')
     mode.add_argument('--bootstrap', action='store_true', help='Install base dependencies via su; prompts for the server root password.')
     parser.add_argument('--syntax-check', action='store_true', help='Check playbook syntax only, without SSH.')
     parser.add_argument('--ask-become-pass', action='store_true', help='Prompt for the remote sudo password during normal deployment.')
+    image_mode = parser.add_mutually_exclusive_group()
+    image_mode.add_argument('--image', help='Pull an explicit image pinned by sha-<40-character commit> or @sha256 digest.')
+    image_mode.add_argument('--build', action='store_true', help='Explicitly build on the server instead of pulling CI artifacts.')
     args = parser.parse_args()
+    deployed_env = ''
     files = payload_files()
     fingerprint = '0' * 64
     inventory = args.inventory.resolve()
     if args.syntax_check and not inventory.exists():
         inventory = ROOT / 'deploy/ansible/inventory.example.yml'
-    if not args.syntax_check and not (args.bootstrap or args.check_server):
+    if not args.syntax_check and not (args.bootstrap or args.check_server or args.status):
         spec = importlib.util.spec_from_file_location('render', ROOT / 'scripts/render.py')
         render = importlib.util.module_from_spec(spec); spec.loader.exec_module(render)
         values = render.read_env(ROOT / '.env')
@@ -70,15 +76,29 @@ def main():
             raise ValueError('Set ACME_EMAIL to your real renewal contact address.')
         if not inventory.is_file():
             raise ValueError('Copy deploy/ansible/inventory.example.yml to inventory.yml and set the SSH target.')
+        image = args.image
+        if not args.build and not image:
+            image = 'ghcr.io/depill/hringbru:sha-' + subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+            if subprocess.check_output(['git', 'diff', 'HEAD', '--', 'Dockerfile', '.dockerignore', 'scripts/entrypoint.sh'], cwd=ROOT):
+                raise ValueError('Image source differs from HEAD. Commit and wait for CI, select --image, or use --build.')
+        if image and not re.fullmatch(r'[a-z0-9][a-z0-9./_-]*(?::sha-[a-f0-9]{40}|@sha256:[a-f0-9]{64})', image):
+            raise ValueError('--image must be pinned by a full sha-commit tag or sha256 digest.')
         digest = hashlib.sha256()
+        digest.update((image or 'local-build').encode())
         for name in files + ['.env', 'secrets/hringdu_password']:
             digest.update(name.encode()); digest.update(b'\0'); digest.update((ROOT / name).read_bytes()); digest.update(b'\0')
+        webhook = ROOT / 'secrets/alert_webhook_url'
+        if webhook.exists(): digest.update(webhook.read_bytes())
         fingerprint = digest.hexdigest()
+        image = image or 'hringbru-asterisk:local-' + fingerprint
+        values['ASTERISK_IMAGE'] = image
+        values['DEPLOY_BUILD'] = 'true' if args.build else 'false'
+        deployed_env = ''.join(f'{k}={v}\n' for k,v in values.items())
         validate_inventory(inventory)
         if args.validate:
             print('Local deployment inputs are valid. No SSH connection or server changes were made.')
             return 0
-    if not args.syntax_check and (args.bootstrap or args.check_server):
+    if not args.syntax_check and (args.bootstrap or args.check_server or args.status):
         if not inventory.is_file():
             raise ValueError('Configure deploy/ansible/inventory.yml with the SSH target first.')
         validate_inventory(inventory)
@@ -87,9 +107,11 @@ def main():
         raise ValueError('Install Ansible first: brew install ansible (macOS), or pipx install ansible-core.')
     with tempfile.TemporaryDirectory(prefix='hringbru-ansible-') as temp:
         extra = Path(temp) / 'vars.json'
-        extra.write_text(json.dumps({'hringbru_source': str(ROOT), 'hringbru_files': files, 'hringbru_version': fingerprint}))
+        env_file = Path(temp) / 'deploy.env'
+        env_file.write_text(deployed_env); env_file.chmod(0o600)
+        extra.write_text(json.dumps({'hringbru_source': str(ROOT), 'hringbru_files': files, 'hringbru_version': fingerprint, 'hringbru_env_file': str(env_file)}))
         extra.chmod(0o600)
-        playbook = 'bootstrap.yml' if args.bootstrap else 'check-server.yml' if args.check_server else 'deploy.yml'
+        playbook = 'bootstrap.yml' if args.bootstrap else 'check-server.yml' if args.check_server else 'status.yml' if args.status else 'deploy.yml'
         command = [executable, '-i', str(inventory), str(ROOT / 'deploy/ansible' / playbook), '-e', '@' + str(extra)]
         if args.syntax_check: command.append('--syntax-check')
         if not args.syntax_check and args.bootstrap:

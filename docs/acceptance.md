@@ -67,7 +67,7 @@ Verified locally on 2026-10-16: the renamed `hringbru-asterisk:22.11.0` arm64 im
 - [ ] Issued certificate, full chain, hostname, trusted Teams CAs and mutual TLS.
 - [x] Hringdu Registered; Microsoft OPTIONS exchanged with `200 OK` in both directions.
 - [ ] Teams gateway dashboard healthy.
-- [ ] Inbound 4129900–4129919 mapped to agreed users/resources.
+- [ ] Inbound configured DID_NUMBERS mapped to agreed users/resources.
 - [ ] Outbound mobile/landline and verified caller ID from each assigned DID.
 - [ ] Bidirectional audio, DTMF, hold/resume, hangup and >30-minute call.
 - [ ] Busy/no-answer, anonymity, transfer/forwarding, voicemail and queues as applicable.
@@ -77,3 +77,8 @@ Verified locally on 2026-10-16: the renamed `hringbru-asterisk:22.11.0` arm64 im
 - [ ] Monitoring, firewall persistence, backups and restart after host reboot.
 
 An image build or process health check does not complete these live acceptance items.
+
+
+## CI, monitoring and deployment recovery
+
+The next release adds native amd64/arm64 CI image builds, GHCR commit images, pull-based deployment, explicit DID allowlists, status checks and optional webhooks. The deployment snapshot includes the exact previous image ID and mounted configuration, installed TLS files, firewall and success marker. Unit tests cover active-call refusal, rollback and interrupted recovery; the Docker fixture deliberately fails candidate health and verifies restoration. CI and registry publication results are recorded in GitHub Actions. These features require deployment before they affect the running server; no external alert destination has been configured or tested.

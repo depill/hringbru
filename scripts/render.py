@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate literal deployment settings and render Asterisk config; no SIP/network writes."""
 import argparse
+import csv
 import ipaddress
 import os
 from pathlib import Path
@@ -33,8 +34,19 @@ def checked(values, key, pattern):
     return value
 
 
+def did_numbers(values):
+    numbers = [n.strip() for n in values.get('DID_NUMBERS', '').split(',')]
+    if not 1 <= len(numbers) <= 200 or any(not re.fullmatch(r'[+]354[0-9]{7}', n) for n in numbers):
+        raise ValueError('DID_NUMBERS must list 1-200 Icelandic E.164 numbers, separated by commas.')
+    if len(set(numbers)) != len(numbers):
+        raise ValueError('DID_NUMBERS contains duplicates.')
+    return sorted(numbers)
+
+
 def validate(values, password):
     v = dict(values)
+    numbers = did_numbers(v)
+    v['DID_PATTERN'] = '^(' + '|'.join('[+]' + n[1:] for n in numbers) + ')$'
     v.setdefault('HRINGBRU_PROJECT_NAME', 'hringbru')
     checked(v, 'HRINGBRU_PROJECT_NAME', r'[a-z0-9][a-z0-9_-]{0,62}')
     host_pattern = r'(?=.{3,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}'
@@ -168,11 +180,20 @@ def main():
     p.add_argument('--env', type=Path, default=ROOT / '.env')
     p.add_argument('--password-file', type=Path, default=ROOT / 'secrets/hringdu_password')
     p.add_argument('--output', type=Path, default=ROOT / '.local/asterisk')
+    p.add_argument('--users-template', type=Path, help='Write a blank Teams user CSV from DID_NUMBERS, without rendering or reading the password.')
     args = p.parse_args()
     try:
         os.umask(0o077)
         (ROOT / '.local').mkdir(mode=0o700, exist_ok=True)
         (ROOT / '.local').chmod(0o700)
+        if args.users_template:
+            if args.users_template.exists():
+                raise ValueError('Users template output already exists; refusing to overwrite mappings.')
+            with args.users_template.open('x', newline='') as f:
+                writer = csv.writer(f); writer.writerow(['PhoneNumber', 'UserPrincipalName'])
+                writer.writerows((n, '') for n in did_numbers(read_env(args.env)))
+            print('Blank user mapping written; assign each number to an explicitly selected user.')
+            return 0
         password = args.password_file.read_text().removesuffix('\n')
         render(read_env(args.env), password, args.output)
     except (ValueError, OSError, KeyError) as e:
