@@ -1,0 +1,14 @@
+all:
+  children:
+    hringbru:
+      hosts:
+        bridge:
+          # Public IP or an existing SSH config alias also works before DNS is pointed.
+          ansible_host: sbc.example.com
+          # Existing regular SSH account with sudo access; the playbook does not create it.
+          ansible_user: deploy
+          ansible_python_interpreter: /usr/bin/python3
+          # If sudo needs a password, use ./bin/deploy --ask-become-pass.
+          # With passwordless sudo, use ./bin/deploy.
+          # ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+          # ansible_port: 22

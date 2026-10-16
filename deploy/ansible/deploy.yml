@@ -1,0 +1,219 @@
+---
+- name: Provision and deploy the Hringbru bridge
+  hosts: hringbru
+  become: true
+  become_method: sudo
+  become_user: root
+  gather_facts: false
+  serial: 1
+  vars:
+    hringbru_root: "{{ hringbru_install_root | default('/opt/hringbru') }}"
+    hringbru_service_prefix: "{{ hringbru_service_name | default('hringbru') }}"
+    hringbru_release: '{{ hringbru_root }}/releases/{{ hringbru_version }}'
+    hringbru_docker_distribution: '{{ ansible_facts.distribution | lower }}'
+    hringbru_docker_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts.architecture] }}"
+  pre_tasks:
+    - name: Check access prerequisites without privilege escalation
+      ansible.builtin.include_tasks: tasks/check-sudo.yml
+    - name: Bootstrap Python through sudo without requiring Python
+      ansible.builtin.include_tasks: tasks/bootstrap-python.yml
+    - name: Gather facts through sudo
+      ansible.builtin.setup:
+    - name: Require one explicitly selected supported server
+      ansible.builtin.assert:
+        that:
+          - groups['hringbru'] | length == 1
+          - ansible_facts.architecture in ['x86_64', 'aarch64']
+          - (ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_major_version | int >= 24) or (ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version | int == 13)
+          - hringbru_root is match('^/opt/[a-zA-Z0-9_-]+$')
+          - hringbru_service_prefix in ['hringbru', 'sipsip']
+          - hringbru_version is match('^[a-f0-9]{64}$')
+        fail_msg: Use one dedicated Ubuntu 24.04+ or Debian 13 server with amd64/arm64 and systemd.
+    - name: Require systemd
+      ansible.builtin.assert:
+        that: ansible_facts.service_mgr == 'systemd'
+    - name: Detect an installation under the former project name
+      ansible.builtin.stat:
+        path: /opt/sipsip/current
+      register: hringbru_legacy
+    - name: Preserve the existing installation's persistent state
+      ansible.builtin.assert:
+        that: not hringbru_legacy.stat.exists or (hringbru_root == '/opt/sipsip' and hringbru_service_prefix == 'sipsip')
+        fail_msg: >-
+          Existing Sipsip deployment detected. Set hringbru_install_root to /opt/sipsip
+          and hringbru_service_name to sipsip in inventory group hringbru, and set
+          HRINGBRU_PROJECT_NAME=sipsip in the private .env before deploying.
+          See docs/operations.md#existing-sipsip-installations.
+    - name: Check for a previous manual deployment
+      ansible.builtin.stat:
+        path: '{{ hringbru_root }}/.local'
+      register: hringbru_manual
+    - name: Require explicit migration of a previous manual deployment
+      ansible.builtin.assert:
+        that: not hringbru_manual.stat.exists
+        fail_msg: Existing {{ hringbru_root }}/.local detected. Migrate its private data to shared before using the Ansible layout; do not discard certificates.
+  tasks:
+    - name: Install host prerequisites
+      ansible.builtin.apt:
+        name: [sudo, python3, python3-apt, openssl, nftables, ca-certificates, util-linux, iproute2]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+    - name: Check existing Docker and Compose
+      ansible.builtin.command:
+        argv: [docker, compose, version, --short]
+      register: hringbru_compose_probe
+      changed_when: false
+      failed_when: false
+    - name: Install Docker from its signed official apt repository if needed
+      when: hringbru_compose_probe.rc != 0
+      block:
+        - name: Check whether an existing apt repository already supplies Docker CE
+          ansible.builtin.command:
+            argv: [apt-cache, policy, docker-ce]
+          register: hringbru_docker_candidate
+          changed_when: false
+        - name: Create apt key directory
+          ansible.builtin.file:
+            path: /etc/apt/keyrings
+            state: directory
+            mode: '0755'
+        - name: Install Docker repository signing key
+          ansible.builtin.get_url:
+            url: 'https://download.docker.com/linux/{{ hringbru_docker_distribution }}/gpg'
+            dest: /etc/apt/keyrings/hringbru-docker.asc
+            mode: '0644'
+          when: "'Candidate:' not in hringbru_docker_candidate.stdout or 'Candidate: (none)' in hringbru_docker_candidate.stdout"
+        - name: Configure Docker apt repository
+          ansible.builtin.copy:
+            dest: /etc/apt/sources.list.d/hringbru-docker.sources
+            mode: '0644'
+            content: |
+              Types: deb
+              URIs: https://download.docker.com/linux/{{ hringbru_docker_distribution }}
+              Suites: {{ ansible_facts.distribution_release }}
+              Components: stable
+              Architectures: {{ hringbru_docker_arch }}
+              Signed-By: /etc/apt/keyrings/hringbru-docker.asc
+          when: "'Candidate:' not in hringbru_docker_candidate.stdout or 'Candidate: (none)' in hringbru_docker_candidate.stdout"
+        - name: Install Docker Engine and Compose plugin
+          ansible.builtin.apt:
+            name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+            state: present
+            update_cache: true
+    - name: Enable Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true
+    - name: Create deployment and private persistent data directories
+      ansible.builtin.file:
+        path: '{{ item.path }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '{{ item.mode }}'
+      loop:
+        - {path: '{{ hringbru_root }}', mode: '0755'}
+        - {path: '{{ hringbru_root }}/releases', mode: '0700'}
+        - {path: '{{ hringbru_root }}/shared', mode: '0700'}
+        - {path: '{{ hringbru_release }}', mode: '0700'}
+        - {path: '{{ hringbru_release }}/config', mode: '0755'}
+        - {path: '{{ hringbru_release }}/scripts', mode: '0755'}
+        - {path: '{{ hringbru_release }}/secrets', mode: '0700'}
+    - name: Transfer only the deployment source allowlist
+      ansible.builtin.copy:
+        src: '{{ hringbru_source }}/{{ item }}'
+        dest: '{{ hringbru_release }}/{{ item }}'
+        owner: root
+        group: root
+        mode: "{{ '0755' if item == 'scripts/entrypoint.sh' else '0644' }}"
+      loop: '{{ hringbru_files }}'
+    - name: Transfer private settings and trunk password without logging their contents
+      ansible.builtin.copy:
+        src: '{{ hringbru_source }}/{{ item }}'
+        dest: '{{ hringbru_release }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0600'
+      loop: [.env, secrets/hringdu_password]
+      no_log: true
+      diff: false
+    - name: Link persistent certificate and runtime data into this release
+      ansible.builtin.file:
+        path: '{{ hringbru_release }}/.local'
+        src: '{{ hringbru_root }}/shared'
+        state: link
+    - name: Build and apply the release under the maintenance lock
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/flock
+          - --nonblock
+          - /run/lock/{{ hringbru_service_prefix }}-maintenance.lock
+          - /usr/bin/python3
+          - '{{ hringbru_release }}/scripts/deploy-server.py'
+      register: hringbru_result
+      changed_when: "'DEPLOYED' in hringbru_result.stdout"
+    - name: Install persistent application firewall service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/{{ hringbru_service_prefix }}-firewall.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Hringbru SIP and media source restrictions
+          After=network-pre.target nftables.service
+          Before=docker.service
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/sbin/nft -f {{ hringbru_root }}/shared/hringbru.nft
+          ExecReload=/usr/sbin/nft -f {{ hringbru_root }}/shared/hringbru.nft
+          [Install]
+          WantedBy=multi-user.target
+    - name: Install renewal service using the same maintenance lock
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/{{ hringbru_service_prefix }}-renew.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Renew Hringbru TLS certificate and gracefully restart Asterisk
+          Requires=docker.service
+          After=docker.service network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=oneshot
+          WorkingDirectory={{ hringbru_root }}/current
+          ExecStart=/usr/bin/flock --nonblock /run/lock/{{ hringbru_service_prefix }}-maintenance.lock /usr/bin/python3 {{ hringbru_root }}/current/scripts/certificates.py renew
+          UMask=0077
+    - name: Install renewal timer
+      ansible.builtin.copy:
+        src: '{{ hringbru_source }}/deploy/hringbru-renew.timer'
+        dest: /etc/systemd/system/{{ hringbru_service_prefix }}-renew.timer
+        mode: '0644'
+    - name: Create Docker service drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: '0755'
+    - name: Require valid application firewall before Docker starts at boot
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/docker.service.d/{{ hringbru_service_prefix }}-firewall.conf
+        mode: '0644'
+        content: |
+          [Unit]
+          Requires={{ hringbru_service_prefix }}-firewall.service
+          After={{ hringbru_service_prefix }}-firewall.service
+    - name: Enable application firewall persistence
+      ansible.builtin.systemd_service:
+        name: '{{ hringbru_service_prefix }}-firewall.service'
+        daemon_reload: true
+        enabled: true
+        state: started
+    - name: Enable automatic certificate renewal
+      ansible.builtin.systemd_service:
+        name: '{{ hringbru_service_prefix }}-renew.timer'
+        enabled: true
+        state: started
+    - name: Report deployment status
+      ansible.builtin.debug:
+        msg: '{{ hringbru_result.stdout_lines }}'

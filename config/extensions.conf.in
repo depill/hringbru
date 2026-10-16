@@ -1,0 +1,70 @@
+; Generated; render again after changing .env. No carrier-to-carrier routing.
+[general]
+static=yes
+writeprotect=yes
+clearglobalvars=no
+
+[default]
+exten => _[0-9+]!,1,Hangup(21)
+
+[normalize-number]
+exten => s,1,Set(NORMALIZED=)
+ same => n,Set(N=${ARG1})
+ same => n,GotoIf($[${REGEX("^[0-9]{7}$" ${N})}]?national)
+ same => n,GotoIf($[${REGEX("^354[0-9]{7}$" ${N})}]?country)
+ same => n,GotoIf($[${REGEX("^00[1-9][0-9]{6,14}$" ${N})}]?international)
+ same => n,GotoIf($[${REGEX("^[+][1-9][0-9]{6,14}$" ${N})}]?e164)
+ same => n,Return()
+ same => n(national),Set(NORMALIZED=+354${N})
+ same => n,Return()
+ same => n(country),Set(NORMALIZED=+${N})
+ same => n,Return()
+ same => n(international),Set(NORMALIZED=+${N:2})
+ same => n,Return()
+ same => n(e164),Set(NORMALIZED=${N})
+ same => n,Return()
+
+[from-hringdu]
+exten => _[0-9+]!,1,NoOp(Hringdu inbound)
+@@INBOUND_DID@@
+ same => n,Set(SAFE_DID=${FILTER(0-9+,${RAW_DID})})
+ same => n,GotoIf($[${LEN(${RAW_DID})} != ${LEN(${SAFE_DID})}]?reject)
+ same => n,Gosub(normalize-number,s,1(${SAFE_DID}))
+ same => n,Set(DID=${NORMALIZED})
+ same => n,GotoIf($[${REGEX("^[+]35441299[01][0-9]$" ${DID})} = 0]?reject)
+ same => n,Set(INBOUND_CLI=${FILTER(0-9+,${CALLERID(num)})})
+ same => n,Gosub(normalize-number,s,1(${INBOUND_CLI}))
+ same => n,ExecIf($[${LEN(${NORMALIZED})} > 0]?Set(CALLERID(num)=${NORMALIZED}))
+ same => n,Dial(PJSIP/${DID}@teams1,60)
+ same => n,GotoIf($["${DIALSTATUS}" = "CHANUNAVAIL" | "${DIALSTATUS}" = "CONGESTION"]?secondary:done)
+ same => n(secondary),Dial(PJSIP/${DID}@teams2,60)
+ same => n,GotoIf($["${DIALSTATUS}" = "CHANUNAVAIL" | "${DIALSTATUS}" = "CONGESTION"]?tertiary:done)
+ same => n(tertiary),Dial(PJSIP/${DID}@teams3,60)
+ same => n(done),Hangup()
+ same => n(reject),Hangup(21)
+
+[from-teams]
+; Health probes may use our advertised Contact user; INVITEs to it are rejected.
+exten => hringbru,1,Hangup(21)
+exten => s,1,Hangup(21)
+exten => _[0-9+]!,1,NoOp(Teams outbound)
+ ; Only a trusted endpoint may reach this context; caller ID must also be in our block.
+ same => n,Set(RAW_CLI=${CALLERID(num)})
+ same => n,Set(SAFE_CLI=${FILTER(0-9+,${RAW_CLI})})
+ same => n,GotoIf($[${LEN(${RAW_CLI})} != ${LEN(${SAFE_CLI})}]?reject)
+ same => n,Gosub(normalize-number,s,1(${SAFE_CLI}))
+ same => n,Set(CLI=${NORMALIZED})
+ same => n,GotoIf($[${REGEX("^[+]35441299[01][0-9]$" ${CLI})} = 0]?reject)
+ same => n,Set(SAFE_DEST=${FILTER(0-9+,${EXTEN})})
+ same => n,GotoIf($[${LEN(${EXTEN})} != ${LEN(${SAFE_DEST})}]?reject)
+ same => n,GotoIf($["${SAFE_DEST}" = "112"]?emergency)
+ same => n,Gosub(normalize-number,s,1(${SAFE_DEST}))
+ same => n,Set(DEST=${NORMALIZED})
+ same => n,GotoIf($[${REGEX("@@OUTBOUND_PATTERN@@" ${DEST})} = 0]?reject)
+@@FORMAT_DEST@@
+ same => n,Goto(send)
+ same => n(emergency),Set(CARRIER_DEST=112)
+ same => n(send),Set(CALLERID(num)=@@FORMAT_CLI@@)
+ same => n,Dial(PJSIP/${CARRIER_DEST}@hringdu,90)
+ same => n,Hangup()
+ same => n(reject),Hangup(21)

@@ -1,0 +1,19 @@
+---
+- name: Check sudo availability as the SSH user
+  ansible.builtin.raw: "command -v {{ ansible_become_exe | default('sudo') | quote }}"
+  become: false
+  vars:
+    ansible_become: false
+  register: hringbru_sudo_probe
+  changed_when: false
+  failed_when: false
+
+- name: Require sudo before privilege escalation
+  ansible.builtin.assert:
+    that: hringbru_sudo_probe.rc == 0
+    fail_msg: >-
+      The sudo executable is missing or unavailable in the SSH user's PATH.
+      Run ./bin/deploy --bootstrap and enter the server root password for su,
+      or have an administrator bootstrap sudo through the server console.
+      See docs/operations.md#bootstrap-a-minimal-server-without-sudo.
+  become: false

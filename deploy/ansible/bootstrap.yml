@@ -1,0 +1,27 @@
+---
+- name: Bootstrap sudo and base dependencies through su
+  hosts: hringbru
+  gather_facts: false
+  become: true
+  become_method: su
+  become_user: root
+  serial: 1
+  tasks:
+    - name: Identify the existing SSH account without privilege escalation
+      ansible.builtin.raw: id -un
+      become: false
+      vars:
+        ansible_become: false
+      register: hringbru_ssh_account
+      changed_when: false
+    - name: Install missing base packages and grant the SSH account sudo access
+      ansible.builtin.script:
+        cmd: '{{ (playbook_dir + "/../../scripts/bootstrap-host.sh") | quote }} {{ hringbru_ssh_account.stdout | trim | quote }}'
+        executable: /bin/sh
+      register: hringbru_bootstrap
+      changed_when: "'HRINGBRU_BOOTSTRAP_CHANGED=1' in hringbru_bootstrap.stdout"
+    - name: Report bootstrap status
+      ansible.builtin.debug:
+        msg: '{{ hringbru_bootstrap.stdout_lines }}'
+    - name: Close the old SSH session so subsequent connections pick up sudo group membership
+      ansible.builtin.meta: reset_connection

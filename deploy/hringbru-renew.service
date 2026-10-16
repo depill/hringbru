@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew Hringbru SIP TLS certificate and gracefully restart Asterisk
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hringbru
+ExecStart=/usr/bin/python3 /opt/hringbru/scripts/certificates.py renew
+UMask=0077

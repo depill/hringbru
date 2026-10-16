@@ -1,0 +1,15 @@
+.local
+secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.DS_Store
+.git
+__pycache__
+deploy/ansible/inventory.yml
+.preview/
+teams/users.csv

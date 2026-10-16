@@ -1,0 +1,12 @@
+---
+- name: Ensure Python and apt bindings exist before fact gathering
+  ansible.builtin.raw: |
+    if /usr/bin/python3 -c 'import apt' >/dev/null 2>&1; then
+      printf 'HRINGBRU_PYTHON_CHANGED=0\n'
+    else
+      apt-get update &&
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-apt &&
+      printf 'HRINGBRU_PYTHON_CHANGED=1\n'
+    fi
+  register: hringbru_python_bootstrap
+  changed_when: "'HRINGBRU_PYTHON_CHANGED=1' in hringbru_python_bootstrap.stdout"

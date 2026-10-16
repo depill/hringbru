@@ -1,0 +1,40 @@
+name: ${HRINGBRU_PROJECT_NAME:-hringbru}
+services:
+  asterisk:
+    build: .
+    image: hringbru-asterisk:22.11.0
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./.local/asterisk:/etc/asterisk:ro
+      - ./.local/tls:/tls:ro
+      - asterisk-data:/var/lib/asterisk
+    tmpfs:
+      - /var/run/asterisk:uid=10001,gid=10001,mode=0750
+      - /var/spool/asterisk:uid=10001,gid=10001,mode=0750
+      - /var/log/asterisk:uid=10001,gid=10001,mode=0750
+      - /tmp:uid=10001,gid=10001,mode=1770
+    healthcheck:
+      test: [CMD-SHELL, "asterisk -rx 'core show uptime' | grep -q 'System uptime' && asterisk -rx 'module show like res_srtp.so' | grep -v 'Not Running' | grep -q Running && asterisk -rx 'module show like chan_pjsip.so' | grep -v 'Not Running' | grep -q Running && asterisk -rx 'pjsip show transports' | grep -q teams-tls"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+    stop_grace_period: 60s
+  certbot:
+    image: certbot/certbot:v5.1.0
+    profiles: [certificates]
+    network_mode: host
+    volumes:
+      - ./.local/letsencrypt:/etc/letsencrypt
+      - ./.local/acme-lib:/var/lib/letsencrypt
+      - ./.local/acme-log:/var/log/letsencrypt
+volumes:
+  asterisk-data:

@@ -1,0 +1,17 @@
+---
+- name: Audit a minimal host without sudo or Python
+  hosts: hringbru
+  gather_facts: false
+  become: false
+  vars:
+    ansible_become: false
+  tasks:
+    - name: Inspect host prerequisites without making configuration changes
+      ansible.builtin.script:
+        cmd: '{{ (playbook_dir + "/../../scripts/check-server.sh") | quote }}'
+        executable: /bin/sh
+      register: hringbru_audit
+      changed_when: false
+    - name: Report host prerequisites
+      ansible.builtin.debug:
+        msg: '{{ hringbru_audit.stdout_lines }}'
