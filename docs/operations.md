@@ -150,6 +150,8 @@ Add this line to the private `.env`:
 HRINGBRU_PROJECT_NAME=sipsip
 ```
 
+The upgrade compares each release's resolved Docker Compose project name. Original releases hardcoded `name: sipsip` and did not require `HRINGBRU_PROJECT_NAME`; a missing old setting is not a request to rename the project. Genuine project-name changes are refused before pulling an image or changing shared runtime data.
+
 Then use the usual `./bin/deploy --ask-become-pass`. Keeping the Docker project identity preserves the existing `sipsip_asterisk-data` volume and container name `sipsip-asterisk-1`; keeping the server path preserves certificates and ACME account state. For that installation, continue using `/opt/sipsip/current`, `sipsip-asterisk-1` and `sipsip-renew.*` in the operational commands below. Source filenames and image names use `hringbru` regardless of these compatibility settings. The updated firewall replaces the former `inet sipsip` table with `inet hringbru`.
 
 The Teams scripts default to `Hringbru-Hringdu` and `Hringbru-Iceland`. If the tenant already uses the former `Sipsip-*` policies, pass `-ResourcePrefix Sipsip` to both Teams scripts to keep updating those same objects. Renaming the repository does not change the gateway FQDN or tenant assignments.

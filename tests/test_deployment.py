@@ -83,7 +83,7 @@ class DeploymentTest(unittest.TestCase):
                       HRINGDU_FROM_USER='00000000*0001', PUBLIC_IPV4='8.8.8.8', HRINGDU_SIGNAL_CIDRS='9.9.9.9/32', HRINGDU_MEDIA_CIDRS='9.9.9.0/24', ACME_EMAIL='ops@example.is')
         (self.release / '.env').write_text(''.join(f'{k}={v}\n' for k,v in values.items()))
         (self.release / 'secrets/hringdu_password').write_text('offline-secret-only\n')
-        self.commands = []; self.running = False; self.active = 0; self.fail_health = False
+        self.commands = []; self.running = False; self.active = 0; self.fail_health = False; self.projects = {}
 
     def tearDown(self): self.temp.cleanup()
 
@@ -95,7 +95,7 @@ class DeploymentTest(unittest.TestCase):
             if command[:1] == ['--project-name']: command = command[2:]
             if command[:1] == ['ps']: output = 'test-container\n' if self.running else ''
             elif command[:1] == ['exec']: output = f'{self.active} active channels\n0 active calls\n'
-            elif command[:1] == ['config']: output = json.dumps({'name': 'hringbru', 'services': {'asterisk': {'image': 'image-1', 'build': '.'}}})
+            elif command[:1] == ['config']: output = json.dumps({'name': self.projects.get(str(Path(args[3]).resolve()), 'hringbru'), 'services': {'asterisk': {'image': 'image-1', 'build': '.'}}})
             elif command[:1] == ['stop']: self.running = False
             elif command[:1] == ['up']:
                 if self.fail_health: raise subprocess.CalledProcessError(1, args)
@@ -137,6 +137,38 @@ class DeploymentTest(unittest.TestCase):
         self.assertFalse((self.shared / 'asterisk').exists())
         self.assertFalse(any('up' in c for c in self.commands))
         self.assertFalse(any(c[:2] == ['nft', '-f'] for c in self.commands))
+
+    def previous_release(self, project_setting=None):
+        old = self.base / 'releases' / ('b' * 64)
+        old.mkdir()
+        (old / '.env').write_text('' if project_setting is None else 'HRINGBRU_PROJECT_NAME=' + project_setting + '\n')
+        (self.base / 'current').symlink_to(old)
+        return old
+
+    def test_legacy_missing_env_setting_uses_compose_identity(self):
+        old = self.previous_release()  # Legacy Compose hardcoded its project name.
+        env = self.release / '.env'
+        env.write_text(env.read_text().replace('HRINGBRU_PROJECT_NAME=hringbru', 'HRINGBRU_PROJECT_NAME=sipsip'))
+        for release in (old, self.release): self.projects[str(release.resolve())] = 'sipsip'
+        self.apply()
+        self.assertEqual((self.base / 'current').resolve(), self.release.resolve())
+        self.assertTrue(any('pull' in c for c in self.commands))
+
+    def test_real_project_change_is_rejected_before_pull_or_shared_mutation(self):
+        old = self.previous_release()
+        self.projects[str(old.resolve())] = 'sipsip'
+        with self.assertRaisesRegex(ValueError, 'cannot change from sipsip to hringbru'): self.apply()
+        self.assertEqual((self.base / 'current').resolve(), old.resolve())
+        self.assertFalse((self.shared / 'asterisk').exists())
+        self.assertFalse(any('pull' in c or 'up' in c for c in self.commands))
+        self.assertFalse(any(c[:2] == ['nft', '-f'] for c in self.commands))
+
+    def test_existing_custom_project_uses_compose_precedence(self):
+        old = self.previous_release('custom-project')
+        # Includes COMPOSE_PROJECT_NAME / fixed `name:` precedence, not just .env.
+        for release in (old, self.release): self.projects[str(release.resolve())] = 'custom-project'
+        self.apply()
+        self.assertEqual((self.base / 'current').resolve(), self.release.resolve())
 
     def test_failed_health_check_does_not_promote_release(self):
         self.fail_health = True

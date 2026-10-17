@@ -40,6 +40,17 @@ def main():
         }}}
         def write(release, value): (release / 'compose.yaml').write_text(json.dumps(value))
         write(old, definition); write(new, definition)
+        # Resolve a pre-rename release with a hardcoded project and no project env key.
+        # The candidate uses the new env-configurable name; they must share the data identity.
+        legacy = base / 'legacy'; legacy.mkdir()
+        (legacy / '.env').write_text('')
+        (legacy / 'compose.yaml').write_text('name: ' + project + '\nservices:\n  asterisk:\n    image: ' + image + '\n')
+        migration = base / 'migration'; migration.mkdir()
+        (migration / '.env').write_text('HRINGBRU_PROJECT_NAME=' + project + '\n')
+        (migration / 'compose.yaml').write_text('name: ${HRINGBRU_PROJECT_NAME:-hringbru}\nservices:\n  asterisk:\n    image: ' + image + '\n')
+        assert d.project_name(legacy) == d.project_name(migration) == project
+        (migration / '.env').write_text('HRINGBRU_PROJECT_NAME=another-project\n')
+        assert d.project_name(migration) != d.project_name(legacy)
         def compose(release, *args):
             return d.run(['docker', 'compose', '--project-directory', str(release), *args], capture=True)
         real_run = d.run

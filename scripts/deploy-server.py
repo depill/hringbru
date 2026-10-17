@@ -19,6 +19,20 @@ def compose(*args, capture=False):
     return run(['docker', 'compose', '--project-directory', str(ROOT), *args], capture=capture)
 
 
+def project_name(release):
+    # Older releases hardcoded `name: sipsip` without an .env project setting.
+    # Let Compose resolve its own defaults and precedence rather than guessing.
+    output = run(['docker', 'compose', '--project-directory', str(release), 'config', '--format', 'json'], capture=True).stdout
+    try:
+        config = json.loads(output)
+    except json.JSONDecodeError:
+        raise ValueError('Cannot determine the effective Docker Compose project name.') from None
+    name = config.get('name') if isinstance(config, dict) else None
+    if not isinstance(name, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', name):
+        raise ValueError('Cannot determine the effective Docker Compose project name.')
+    return name
+
+
 def check_idle(output):
     match = re.search(r'^(\d+) active channels\s*$', output, re.MULTILINE)
     if not match:
@@ -123,10 +137,11 @@ def main():
     if (ROOT / '.local').resolve() != shared.resolve():
         raise ValueError('Release .local must point to the managed shared data directory.')
     values = read_env(ROOT / '.env')
-    if (base / 'current/.env').exists():
-        old_project = read_env(base / 'current/.env').get('HRINGBRU_PROJECT_NAME', 'hringbru')
-        if values.get('HRINGBRU_PROJECT_NAME', 'hringbru') != old_project:
-            raise ValueError('HRINGBRU_PROJECT_NAME cannot change across releases; it identifies persistent Docker data.')
+    if (base / 'current').exists():
+        old_project = project_name(base / 'current')
+        new_project = project_name(ROOT)
+        if new_project != old_project:
+            raise ValueError(f'Docker project cannot change from {old_project} to {new_project}; it identifies persistent Docker data. Keep HRINGBRU_PROJECT_NAME={old_project}.')
     transaction = Transaction(base)
     if transaction.pending.exists():
         print('Recovering an interrupted deployment before applying this release.', flush=True)
